@@ -1,4 +1,3 @@
-// 摘自忍者秘籍
 function fixEvent(event) {
     function returnTrue() { return true; }
     function returnFalse() { return false; }
@@ -145,7 +144,8 @@ function fixEvent(event) {
 
         if(data.handlers[type].length == 1){
             if(document.addEventListener){
-                elem.addEventListener(type, data.dispatcher, false);
+                elem.addEventListener(type === "focusin" ? "focus" : 
+                    type === "focusout" ? "blur" : type, data.dispatcher, type === "focusin" || type === "focusout");
             }else if(document.attachEvent){
                 elem.attachEvent("on"+type, data.dispatcher);
             }
@@ -209,7 +209,7 @@ function tidyUp(elem, type){
         delete data.handlers[type];
 
         if(document.removeEventListener){
-            elem.removeEventListener(type, data.dispatcher, false);
+            elem.removeEventListener(type === "focusin" ? "focus" : type === "focusout" ? "blur" : type, data.dispatcher, type === "focusin" || type === "focusout");
         }else if(document.detachEvent){
             elem.detachEvent("on"+type, data.dispatcher);
         }
@@ -255,3 +255,234 @@ function triggerEvent(elem, event){
         }
     }
 }
+
+// 事情委托：修复浏览器的不足
+/**
+ * 在很多浏览器中，submit、change、focus以及blur事情的冒泡实现都有严重的问题
+ */
+
+// 检测一个事件是否可以冒泡至父元素
+// 通过在<div>元素上检查是否已经存在ontype属性来判断
+function isEventSupported(eventName){
+    var element = document.createElement('div'),
+        isSupported;
+
+    eventName = "on"+eventName;
+    isSupported = (eventName in element);
+
+    // 侵入式检测，创建一个ontype特性并给它一点代码，然后再判断该元素
+    // 是否可以将其转换成一个函数。如果可以转成一个函数，则可以很好地说明
+    // 该元素知道如何解释冒泡事件。
+    if(!isSupported){
+        element.setAttribute(eventName, 'return;');
+        isSupported = typeof element[eventName] = 'function';
+    }
+
+    element = null;
+    return isSupported;
+}
+
+(function(){
+    var isSubmitEventSupported = isEventSupported("submit");
+
+    function isInForm(elem){
+        var parent = elem.parentNode;
+
+        while(parent){
+            if(parent.nodeName.toLowerCase() === "form"){
+                return true;
+            }
+            parent = parent.parentNode;
+        }
+
+        return false;
+    }
+
+    function trigggerSubmitOnClick(e){
+        var type = e.target.type;
+        if((type === "submit" || type === "image") && 
+            isInForm(e.target)){
+            return triggerEvent(this, "submit");
+        }
+    }
+
+    function triggerSubmitOnKey(e){
+        var type = e.target.type;
+
+        if((type === "text" || type === "password") &&
+            isInForm(e.target) && e.keyCode === 13){
+                return triggerEvent(this, "submit");
+            }
+    }
+
+    this.addSubmit = function(elem, fn){
+        addEvent(elem, "submit", fn);
+
+        if(isSubmitEventSupported) return;
+
+        if(elem.nodeName.toLowerCase() !== "form" &&
+            getData(elem).handlers.submit.length === 1){
+            addEvent(elem, "click", triggerSubmitOnClick);
+            addEvent(elem, "keypress", triggerSubmitOnKey)
+        }
+    }
+
+    this.addSubmit = function(elem, fn){
+        removeEvent(elem, "submit", fn);
+
+        if(isSubmitEventSupported) return;
+
+        var data = getData(elem);
+
+        if(elem.nodeName.toLowerCase() !== "form" &&
+            !data || !data.events || !data.events.submit){
+            removeEvent(elem, "click", triggerSubmitOnClick);
+            removeEvent(elem, "keypress", triggerSubmitOnKey)
+        }
+    }
+})();
+
+// 冒泡change事件，必须绑定不同的事件：
+/**
+ * 1. focusout事件用于检查表单元素失去焦点之后的值
+ * 2. click和keydown事件用于检查元素值的瞬时改变
+ * 3. beforeactivate事件获取一个元素被替换之前的旧值
+ */
+(function(){
+    var isChangeEventSupported = isEventSupported("change");
+
+    this.addChange = function(elem, fn){
+        addEvent(elem, "change", fn);
+
+        if(isChangeEventSupported) return;
+
+        if(getData(elem).events.change.length === 1){
+            addEvent(elem, "focusout", triggerChangeIfValueChanged);
+            addEvent(elem, "click", triggerChangeOnClick);
+            addEvent(elem, "keydown", triggerChangeOnKeyDown);
+            addEvent(elem, "beforeactivate", triggerChangeOnBefore);
+        }
+    };
+
+    this.removeChange = function(elem, fn){
+        removeEvent(elem, "change", fn);
+
+        if(isChangeEventSupported) return;
+
+        var data = getData(elem);
+
+        if(!data || !data.events || !data.events.submit){
+            removeEvent(elem, "focusout", triggerChangeIfValueChanged);
+            removeEvent(elem, "click", triggerChangeOnClick);
+            removeEvent(elem, "keydown", triggerChangeOnKeyDown);
+            removeEvent(elem, "beforeactivate", triggerChangeOnBefore);
+        }
+    };
+
+    function triggerChangeOnClick(e){
+        var type=e.target.type;
+        if(type === "radio" || type === "checkbox" ||
+            e.target.nodeName.toLowerCase() === "select"){
+            return triggerChangeIfValueChanged.call(this, e);
+        }
+    }
+
+    function triggerChangeOnKeyDown(e){
+        var type = e.target.type,
+            key = e.keyCode;
+        if(key === 13 && e.target.nodeName.toLowerCase() !== "textarea" ||
+            key === 32 (type === "checkbox" || type==="radio") ||
+            type === "select-multiple"){
+            return triggerChangeIfValueChanged.call(this, e);        
+        }
+    }
+
+    function triggerChangeOnbefore(e){
+        getData(e.target)._change_data = getVal(e.target);
+    }
+
+    function getVal(elem){
+        var type = elem.type,
+            val = elem.value;
+
+        if(type === "radio" || type === "checkbox"){
+            val = elem.checked;
+        }else if(type === "select-multiple"){
+            val = "";
+            if(elem.selectedIndex > -1){
+                for(var i=0;i<elem.options.length;i++){
+                    val += "-" + elem.options[i].selected;
+                }
+            }
+        }else if (elem.nodeName.toLowerCase() === "select"){
+            val = elem.selectedIndex;
+        }
+
+        return val;
+    }
+
+    function triggerChangeIfValueChanged(e){
+        var elem = e.target, data, val;
+        var formElems = /texttarea|input|select/i;
+
+        if(!formElems.test(elem.nodeName) || elem.readOnly){
+            return;
+        }
+        data = getData(elem)._change_data;
+        val = getVal(elem);
+        if(e.type !== "focusout" || elem.type !== "radio"){
+            getData(elem)._change_data = val;
+        }
+
+        if(data === undefined || val === data){
+            return;
+        }
+        if(data != null || val){
+            return triggerEvent(elem, "change");
+        }
+    }
+})();
+
+(function(){
+    if(isEventSupported("mouseenter")){
+        this.hover = function(elem, fn){
+            addEvent(elem, "mouseenter", function(){
+                fn.call(elem,"mouseenter");
+            });
+
+            addEvent(elem, "mouseleave", function(){
+                fn.call(elem, "mouseleave");
+            });
+        }
+    }else {
+        this.hover = function(elem, fn){
+            addEvent(elem, "mouseover", function(e){
+                withinElement(this, e, "mouseenter", fn);
+            });
+
+            addEvent(elem, "mouseout", function(e){
+                withinElement(this, e, "mouseleave", fn);
+            });
+        };
+    }
+
+    // 在mouseover和mouseout事件中检查relatedTarget，也就是mouseout事件发生时要进入的元素
+    // 或者mouseover事件发生时要离开的元素。在这两种情况下，如果该相关元素在悬停元素内，就忽略它，
+    // 否则，该元素就是要离开或进入的悬停元素，那么就触发处理程序。
+    function withinElement(elem, event, type, handle){
+        var parent = event.relatedTarget;
+        while(parent && parent != elem){
+            try{
+                parent = parent.parentNode;
+            }
+            catch(e){
+                break;
+            }
+        }
+
+        if(parent != elem){
+            handle.call(elem, type);
+        }
+    }
+})();
+
